@@ -48,11 +48,14 @@ MYSQL_STATUS_VARS = {
     'Created_tmp_disk_tables': 'counter',
     'Created_tmp_files': 'counter',
     'Created_tmp_tables': 'counter',
+    'Innodb_buffer_pool_bytes_data': 'gauge',
+    'Innodb_buffer_pool_bytes_dirty': 'gauge',
     'Innodb_buffer_pool_pages_data': 'gauge',
     'Innodb_buffer_pool_pages_dirty': 'gauge',
     'Innodb_buffer_pool_pages_free': 'gauge',
     'Innodb_buffer_pool_pages_total': 'gauge',
     'Innodb_buffer_pool_read_requests': 'counter',
+    'Innodb_buffer_pool_write_requests': 'counter',
     'Innodb_buffer_pool_reads': 'counter',
     'Innodb_checkpoint_age': 'gauge',
     'Innodb_checkpoint_max_age': 'gauge',
@@ -75,6 +78,7 @@ MYSQL_STATUS_VARS = {
     'Innodb_ibuf_size': 'gauge',
     'Innodb_lsn_current': 'counter',
     'Innodb_lsn_flushed': 'counter',
+    'Innodb_log_writes': 'counter',
     'Innodb_max_trx_id': 'counter',
     'Innodb_mem_adaptive_hash': 'gauge',
     'Innodb_mem_dictionary': 'gauge',
@@ -83,9 +87,11 @@ MYSQL_STATUS_VARS = {
     'Innodb_mutex_spin_rounds': 'counter',
     'Innodb_mutex_spin_waits': 'counter',
     'Innodb_os_log_pending_fsyncs': 'gauge',
+    'Innodb_os_log_written': 'gauge',
     'Innodb_pages_created': 'counter',
     'Innodb_pages_read': 'counter',
     'Innodb_pages_written': 'counter',
+    'Innodb_page_size': 'gauge',
     'Innodb_row_lock_time': 'counter',
     'Innodb_row_lock_time_avg': 'gauge',
     'Innodb_row_lock_time_max': 'gauge',
@@ -125,6 +131,7 @@ MYSQL_STATUS_VARS = {
     'Qcache_not_cached': 'counter',
     'Qcache_queries_in_cache': 'counter',
     'Qcache_total_blocks': 'counter',
+    'Queries': 'counter',
     'Questions': 'counter',
     'Select_full_join': 'counter',
     'Select_full_range_join': 'counter',
@@ -161,15 +168,20 @@ MYSQL_VARS = [
     'innodb_io_capacity',
     'innodb_log_buffer_size',
     'innodb_log_file_size',
+    'innodb_log_files_in_group',
+    'innodb_max_purge_lag',
     'innodb_open_files',
     'innodb_open_files',
     'join_buffer_size',
+    'key_buffer_size',
+    'key_cache_block_size',
     'max_connections',
     'open_files_limit',
     'query_cache_limit',
     'query_cache_size',
     'query_cache_size',
     'read_buffer_size',
+    'read_only',
     'table_cache',
     'table_definition_cache',
     'table_open_cache',
@@ -196,6 +208,8 @@ MYSQL_PROCESS_STATES = {
     'statistics': 0,
     'updating': 0,
     'writing_to_net': 0,
+    'creating_table': 0,
+    'opening_tabes': 0,
 }
 
 MYSQL_INNODB_STATUS_VARS = {
@@ -307,25 +321,20 @@ def mysql_query(conn, query):
 
 def fetch_mysql_status(conn):
     result = mysql_query(conn, 'SHOW GLOBAL STATUS')
+    print result
     status = {}
     for row in result.fetchall():
         status[row['Variable_name']] = row['Value']
 
-        # calculate the number of unpurged txns from existing variables
-        if 'Innodb_max_trx_id' in status:
-                status['Innodb_unpurged_txns'] = \
-                    int(status['Innodb_max_trx_id']) - \
-                    int(status['Innodb_purge_trx_id'])
+    # calculate the number of unpurged txns from existing variables
+    if 'Innodb_max_trx_id' in status:
+        status['Innodb_unpurged_txns'] = int(status['Innodb_max_trx_id']) - int(status['Innodb_purge_trx_id'])
 
-        if 'Innodb_lsn_last_checkpoint' in status:
-                status['Innodb_uncheckpointed_bytes'] = \
-                    int(status['Innodb_lsn_current']) - \
-                    int(status['Innodb_lsn_last_checkpoint'])
+    if 'Innodb_lsn_last_checkpoint' in status:
+        status['Innodb_uncheckpointed_bytes'] = int(status['Innodb_lsn_current']) - int(status['Innodb_lsn_last_checkpoint'])
 
-        if 'Innodb_lsn_flushed' in status:
-                status['Innodb_unflushed_log'] = \
-                    int(status['Innodb_lsn_current']) - \
-                    int(status['Innodb_lsn_flushed'])
+    if 'Innodb_lsn_flushed' in status:
+        status['Innodb_unflushed_log'] = int(status['Innodb_lsn_current']) - int(status['Innodb_lsn_flushed'])
 
     return status
 
@@ -351,71 +360,60 @@ def fetch_mysql_slave_stats(conn):
         result = mysql_query(conn, 'SHOW SLAVE STATUS')
         slave_row = result.fetchone()
         if slave_row is None:
-                return {}
-        if slave_row['Seconds_Behind_Master'] != None:
-            slave_lag = slave_row['Seconds_Behind_Master']
-        else:
-            slave_lag = 0
+            return {}
 
         status = {
-                'relay_log_space': slave_row['Relay_Log_Space'],
-                'slave_lag': slave_lag,
+            'relay_log_space': slave_row['Relay_Log_Space'],
+            'last_errno': slave_row['Last_Errno'],
+            'slave_lag': slave_row['Seconds_Behind_Master'] if slave_row['Seconds_Behind_Master'] != None else 0,
         }
 
         if MYSQL_CONFIG['HeartbeatTable']:
-                query = """
-                        SELECT
-                        MAX(UNIX_TIMESTAMP() - UNIX_TIMESTAMP(ts)) AS delay
-                        FROM %s
-                        WHERE server_id = %s
-                """ % (MYSQL_CONFIG['HeartbeatTable'],
-                       slave_row['Master_Server_Id'])
-                result = mysql_query(conn, query)
-                row = result.fetchone()
-                if 'delay' in row and row['delay'] != None:
-                    status['slave_lag'] = row['delay']
+            query = """
+                SELECT
+                MAX(UNIX_TIMESTAMP() - UNIX_TIMESTAMP(ts)) AS delay
+                FROM %s
+                WHERE server_id = %s
+            """ % (MYSQL_CONFIG['HeartbeatTable'], slave_row['Master_Server_Id'])
+            result = mysql_query(conn, query)
+            row = result.fetchone()
+            if 'delay' in row and row['delay'] != None:
+                status['slave_lag'] = row['delay']
 
-        if slave_row['Slave_SQL_Running'] == 'Yes':
-            status['slave_running'] = 1
-        else:
-            status['slave_running'] = 0
-
-        if slave_row['Slave_SQL_Running'] == 'Yes':
-            status['slave_stopped'] = 1
-        else:
-            status['slave_stopped'] = 0
+        status['slave_sql_running'] = 1 if slave_row['Slave_SQL_Running'] == 'Yes' else 0
+        status['slave_io_running'] = 1 if slave_row['Slave_IO_Running'] == 'Yes' else 0
+        status['slave_running'] = 1 if slave_row['Slave_SQL_Running'] == 'Yes' else 0
+        status['slave_stopped'] = 1 if slave_row['Slave_SQL_Running'] == 'No' else 0
 
         return status
-
 
 def fetch_mysql_process_states(conn):
         global MYSQL_PROCESS_STATES
         result = mysql_query(conn, 'SHOW PROCESSLIST')
         states = MYSQL_PROCESS_STATES.copy()
         for row in result.fetchall():
-                state = row['State']
-                if state == '' or state is None:
-                    state = 'none'
-                state = re.sub(r'^(Table lock|Waiting for .*lock)$',
-                               "Locked", state)
-                state = state.lower().replace(" ", "_")
-                if state not in states:
-                    state = 'other'
-                states[state] += 1
+            state = row['State']
+            if state == '' or state is None:
+                state = 'none'
+            state = re.sub(r'^(Table lock|Waiting for .*lock)$', "Locked", state)
+            state = state.lower().replace(" ", "_")
+            if state not in states: state = 'other'
+            states[state] += 1
 
         return states
-
 
 def fetch_mysql_variables(conn):
         global MYSQL_VARS
         result = mysql_query(conn, 'SHOW GLOBAL VARIABLES')
         variables = {}
         for row in result.fetchall():
-                if row['Variable_name'] in MYSQL_VARS:
-                        variables[row['Variable_name']] = row['Value']
+            if row['Variable_name'] in MYSQL_VARS:
+                if row['Variable_name'] == 'read_only':
+                    variables[row['Variable_name']] = 1 if row['Value'] == 'ON' else 0
+                else:
+                    variables[row['Variable_name']] = row['Value']
 
         return variables
-
 
 def fetch_mysql_response_times(conn):
         response_times = {}
@@ -434,7 +432,7 @@ def fetch_mysql_response_times(conn):
 
                 # fill in missing rows with zeros
                 if not row:
-                        row = {'count': 0, 'total': 0}
+                        row = { 'count': 0, 'total': 0 }
 
                 response_times[i] = {
                         'time':  float(row['time']),
@@ -443,7 +441,6 @@ def fetch_mysql_response_times(conn):
                 }
 
         return response_times
-
 
 def fetch_innodb_stats(conn):
         global MYSQL_INNODB_STATUS_MATCHES, MYSQL_INNODB_STATUS_VARS
@@ -455,8 +452,7 @@ def fetch_innodb_stats(conn):
         for line in status.split("\n"):
                 line = line.strip()
                 row = re.split(r' +', re.sub(r'[,;] ', ' ', line))
-                if line == '':
-                    continue
+                if line == '': continue
 
                 # ---TRANSACTION 124324402462, not started
                 # ---TRANSACTION 124324402468, ACTIVE 0 sec committing
@@ -476,11 +472,9 @@ def fetch_innodb_stats(conn):
                                 stats['innodb_lock_structs'] += int(row[0])
                 else:
                         for match in MYSQL_INNODB_STATUS_MATCHES:
-                            if line.find(match) == -1:
-                                continue
+                            if line.find(match) == -1: continue
                             for key in MYSQL_INNODB_STATUS_MATCHES[match]:
-                                value = \
-                                    MYSQL_INNODB_STATUS_MATCHES[match][key]
+                                value = MYSQL_INNODB_STATUS_MATCHES[match][key]
                                 if type(value) is int:
                                     stats[key] = int(row[value])
                                 else:
@@ -828,7 +822,6 @@ def log_verbose(msg):
                 return
         collectd.info('mysql plugin: %s' % msg)
 
-
 def dispatch_value(prefix, key, value, type, type_instance=None):
         if not type_instance:
                 type_instance = key
@@ -844,7 +837,6 @@ def dispatch_value(prefix, key, value, type, type_instance=None):
         val.values = [value]
         val.dispatch()
 
-
 def configure_callback(conf):
         global MYSQL_CONFIG
         for node in conf.children:
@@ -853,7 +845,6 @@ def configure_callback(conf):
 
         MYSQL_CONFIG['Port'] = int(MYSQL_CONFIG['Port'])
         MYSQL_CONFIG['Verbose'] = bool(MYSQL_CONFIG['Verbose'])
-
 
 def read_callback():
         global MYSQL_STATUS_VARS
