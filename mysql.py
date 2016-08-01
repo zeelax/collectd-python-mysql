@@ -818,33 +818,33 @@ def fetch_slow_queries_excluding_table_names(conn):
 
 
 def log_verbose(msg):
-        if MYSQL_CONFIG['Verbose'] == False:
-                return
-        collectd.info('mysql plugin: %s' % msg)
+    if MYSQL_CONFIG['Verbose'] == False:
+        return
+    collectd.info('mysql plugin: %s' % msg)
 
 def dispatch_value(prefix, key, value, type, type_instance=None):
-        if not type_instance:
-                type_instance = key
+    if not type_instance:
+        type_instance = key
 
-        log_verbose('Sending value: %s/%s=%s' % (prefix, type_instance, value))
-        if not value:
-                return
-        value = int(value)  # safety check
+    log_verbose('Sending value: %s/%s=%s' % (prefix, type_instance, value))
+    if not value and value != 0:
+        return
+    value = int(value)  # safety check
 
-        val = collectd.Values(plugin='mysql', plugin_instance=prefix)
-        val.type = type
-        val.type_instance = type_instance
-        val.values = [value]
-        val.dispatch()
+    val = collectd.Values(plugin='mysql', plugin_instance=prefix)
+    val.type = type
+    val.type_instance = type_instance
+    val.values = [value]
+    val.dispatch()
 
 def configure_callback(conf):
-        global MYSQL_CONFIG
-        for node in conf.children:
-                if node.key in MYSQL_CONFIG:
-                        MYSQL_CONFIG[node.key] = node.values[0]
+    global MYSQL_CONFIG
+    for node in conf.children:
+        if node.key in MYSQL_CONFIG:
+            MYSQL_CONFIG[node.key] = node.values[0]
 
-        MYSQL_CONFIG['Port'] = int(MYSQL_CONFIG['Port'])
-        MYSQL_CONFIG['Verbose'] = bool(MYSQL_CONFIG['Verbose'])
+    MYSQL_CONFIG['Port'] = int(MYSQL_CONFIG['Port'])
+    MYSQL_CONFIG['Verbose'] = bool(MYSQL_CONFIG['Verbose'])
 
 def read_callback():
         global MYSQL_STATUS_VARS
