@@ -62,7 +62,7 @@ You can also configure several instances:
         </Module>        
     </Plugin>
 
-If ```Instance``` not defined then ```Host:Port``` will be user instead.
+If ```Instance``` not defined then ```Host:Port``` will be used as instance name.
 
 ## Metrics
 
