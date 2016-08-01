@@ -28,14 +28,8 @@ import re
 import MySQLdb
 import binascii
 
-MYSQL_CONFIG = {
-    'Host': 'localhost',
-    'Port': 3306,
-    'User': 'root',
-    'Password': '',
-    'HeartbeatTable': '',
-    'Verbose':        False,
-}
+CONFIGS = []
+VERBOSE = False
 
 MYSQL_STATUS_VARS = {
     'Aborted_clients': 'counter',
@@ -304,12 +298,12 @@ MYSQL_INNODB_STATUS_MATCHES = {
 }
 
 
-def get_mysql_conn():
+def get_mysql_conn(conf):
     return MySQLdb.connect(
-        host=MYSQL_CONFIG['Host'],
-        port=MYSQL_CONFIG['Port'],
-        user=MYSQL_CONFIG['User'],
-        passwd=MYSQL_CONFIG['Password']
+        host=conf['Host'],
+        port=conf['Port'],
+        user=conf['User'],
+        passwd=conf['Password']
     )
 
 
@@ -356,7 +350,7 @@ def fetch_mysql_master_stats(conn):
         return stats
 
 
-def fetch_mysql_slave_stats(conn):
+def fetch_mysql_slave_stats(conf, conn):
         result = mysql_query(conn, 'SHOW SLAVE STATUS')
         slave_row = result.fetchone()
         if slave_row is None:
@@ -368,13 +362,13 @@ def fetch_mysql_slave_stats(conn):
             'slave_lag': slave_row['Seconds_Behind_Master'] if slave_row['Seconds_Behind_Master'] != None else 0,
         }
 
-        if MYSQL_CONFIG['HeartbeatTable']:
+        if conf['HeartbeatTable']:
             query = """
                 SELECT
                 MAX(UNIX_TIMESTAMP() - UNIX_TIMESTAMP(ts)) AS delay
                 FROM %s
                 WHERE server_id = %s
-            """ % (MYSQL_CONFIG['HeartbeatTable'], slave_row['Master_Server_Id'])
+            """ % (conf['HeartbeatTable'], slave_row['Master_Server_Id'])
             result = mysql_query(conn, query)
             row = result.fetchone()
             if 'delay' in row and row['delay'] != None:
@@ -818,11 +812,11 @@ def fetch_slow_queries_excluding_table_names(conn):
 
 
 def log_verbose(msg):
-    if MYSQL_CONFIG['Verbose'] == False:
+    if VERBOSE == False:
         return
     collectd.info('mysql plugin: %s' % msg)
 
-def dispatch_value(prefix, key, value, type, type_instance=None):
+def dispatch_value(prefix, key, value, type, instance='', type_instance=None):
     if not type_instance:
         type_instance = key
 
@@ -831,24 +825,53 @@ def dispatch_value(prefix, key, value, type, type_instance=None):
         return
     value = int(value)  # safety check
 
-    val = collectd.Values(plugin='mysql', plugin_instance=prefix)
+    val = collectd.Values(plugin='mysql', plugin_instance='%s-%s' % (instance, prefix))
     val.type = type
     val.type_instance = type_instance
     val.values = [value]
     val.dispatch()
 
 def configure_callback(conf):
-    global MYSQL_CONFIG
+    MYSQL_CONFIG = {
+        'Host': 'localhost',
+        'Port': 3306,
+        'User': 'root',
+        'Password': '',
+        'HeartbeatTable': '',
+        'Verbose': False,
+        'Instance': None
+    }
+
     for node in conf.children:
         if node.key in MYSQL_CONFIG:
             MYSQL_CONFIG[node.key] = node.values[0]
 
     MYSQL_CONFIG['Port'] = int(MYSQL_CONFIG['Port'])
-    MYSQL_CONFIG['Verbose'] = bool(MYSQL_CONFIG['Verbose'])
+
+    global VERBOSE
+    VERBOSE = bool(MYSQL_CONFIG['Verbose']) or VERBOSE
+
+
+    CONFIGS.append( {
+        'Host': MYSQL_CONFIG['Host'],
+        'Port': MYSQL_CONFIG['Port'],
+        'User': MYSQL_CONFIG['User'],
+        'Password': MYSQL_CONFIG['Password'],
+        'HeartbeatTable': MYSQL_CONFIG['HeartbeatTable'],
+        'Instance': MYSQL_CONFIG['Instance']
+    } )
 
 def read_callback():
+    for conf in CONFIGS:
+        get_metrics(conf)
+
+def get_metrics(conf):
         global MYSQL_STATUS_VARS
-        conn = get_mysql_conn()
+        conn = get_mysql_conn(conf)
+
+        instance = conf['Instance']
+        if instance is None:
+            instance = '{host}:{port}'.format(host=conf['Host'], port=conf['Port'])
 
         mysql_status = fetch_mysql_status(conn)
         for key in mysql_status:
@@ -864,47 +887,47 @@ def read_callback():
                 else:
                         continue
 
-                dispatch_value('status', key, mysql_status[key], ds_type)
+                dispatch_value('status', key, mysql_status[key], ds_type, instance)
 
         mysql_variables = fetch_mysql_variables(conn)
         for key in mysql_variables:
-                dispatch_value('variables', key, mysql_variables[key], 'gauge')
+                dispatch_value('variables', key, mysql_variables[key], 'gauge', instance)
 
         mysql_master_status = fetch_mysql_master_stats(conn)
         for key in mysql_master_status:
-                dispatch_value('master', key, mysql_master_status[key], 'gauge')
+                dispatch_value('master', key, mysql_master_status[key], 'gauge', instance)
 
         mysql_states = fetch_mysql_process_states(conn)
         for key in mysql_states:
-                dispatch_value('state', key, mysql_states[key], 'gauge')
+                dispatch_value('state', key, mysql_states[key], 'gauge', instance)
 
-        slave_status = fetch_mysql_slave_stats(conn)
+        slave_status = fetch_mysql_slave_stats(conf, conn)
         for key in slave_status:
-                dispatch_value('slave', key, slave_status[key], 'gauge')
+                dispatch_value('slave', key, slave_status[key], 'gauge', instance)
 
         response_times = fetch_mysql_response_times(conn)
         for key in response_times:
-                dispatch_value('response_time_total', str(key), response_times[key]['total'], 'counter')
-                dispatch_value('response_time_count', str(key), response_times[key]['count'], 'counter')
+                dispatch_value('response_time_total', str(key), response_times[key]['total'], 'counter', instance)
+                dispatch_value('response_time_count', str(key), response_times[key]['count'], 'counter', instance)
 
         innodb_status = fetch_innodb_stats(conn)
         for key in MYSQL_INNODB_STATUS_VARS:
                 if key not in innodb_status: continue
-                dispatch_value('innodb', key, innodb_status[key], MYSQL_INNODB_STATUS_VARS[key])
+                dispatch_value('innodb', key, innodb_status[key], MYSQL_INNODB_STATUS_VARS[key], instance)
 
         # Performance_Schema metrics
         if is_ps_enabled(conn):
                 queries = fetch_slow_queries(conn)
                 for key in queries:
-                        dispatch_value('slow_query', key, queries[key], 'counter')
+                        dispatch_value('slow_query', key, queries[key], 'counter', instance)
 
                 queries = fetch_slow_queries_excluding_table_names(conn)
                 for key in queries:
-                        dispatch_value('slow_query_excluding_table_names', "{}-{}".format(binascii.crc32(key) % 100, key) , queries[key], 'counter')
+                        dispatch_value('slow_query_excluding_table_names', "{}-{}".format(binascii.crc32(key) % 100, key) , queries[key], 'counter', instance)
         
                 queries = fetch_warning_error_queries(conn)
                 for key in queries:
-                        dispatch_value('warn_err_query', key, queries[key], 'counter')
+                        dispatch_value('warn_err_query', key, queries[key], 'counter', instance)
         
 #                queries = fetch_indexes_not_being_used(conn)
 #                for key in queries:
@@ -916,15 +939,15 @@ def read_callback():
 
                 queries=fetch_connections_per_user(conn)
                 for key in queries:
-                        dispatch_value('connections_per_user', key, queries[key], 'gauge')
+                        dispatch_value('connections_per_user', key, queries[key], 'gauge', instance)
 
                 queries=fetch_connections_per_host(conn)
                 for key in queries:
-                        dispatch_value('connections_per_host', key, queries[key], 'gauge')
+                        dispatch_value('connections_per_host', key, queries[key], 'gauge', instance)
 
                 queries=fetch_connections_per_account(conn)
                 for key in queries:
-                        dispatch_value('connections_per_account', key, queries[key], 'gauge')
+                        dispatch_value('connections_per_account', key, queries[key], 'gauge', instance)
 
 
 collectd.register_read(read_callback)

@@ -37,6 +37,33 @@ You should then configure the MySQL plugin:
 		</Module>
 	</Plugin>
 
+You can also configure several instances:
+
+    <Plugin python>
+        Import mysql
+        <Module mysql>
+            Host "localhost" (default: localhost)
+            Port 3306 (default: 3306)
+            User "root" (default: root)
+            Password "xxxx" (default: empty)
+            HeartbeatTable "percona.heartbeat" (if using pt-heartbeat to track slave lag)
+            Verbose false (default: false)
+            Instance: "localhost_3306"
+        </Module>
+
+        <Module mysql>
+            Host "localhost" (default: localhost)
+            Port 3307 (default: 3306)
+            User "root" (default: root)
+            Password "xxxx" (default: empty)
+            HeartbeatTable "percona.heartbeat" (if using pt-heartbeat to track slave lag)
+            Verbose false (default: false)
+            Instance "localhost_3307"
+        </Module>        
+    </Plugin>
+
+If ```Instance``` not defined then ```Host:Port``` will be user instead.
+
 ## Metrics
 
 ### MySQL Status
